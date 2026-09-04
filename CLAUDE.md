@@ -21,6 +21,12 @@ and (for behavioral changes) manual smoke-testing against a real Home Assistant 
   validator) and the `hacs/action` validator on every push/PR — there's no local equivalent,
   so keep `manifest.json`, `hacs.json`, and `strings.json`/`translations/*.json` internally
   consistent by hand.
+  - **On a fork**, `hacs/action` reliably fails two checks that have nothing to do with
+    the code: `<Validation topics>` ("no valid topics") and `<Validation issues>` ("issues
+    not enabled"). Both are GitHub repo *settings* (repo topics, and Settings → General →
+    Features → Issues) that forks don't inherit/enable by default — not something a code
+    change fixes. Treat these two specific failures as expected fork noise, not a real
+    CI-red blocker; anything else `hacs/action` reports is still real and needs fixing.
 - Releasing: push a `v*` tag; `.github/workflows/release.yml` extracts that version's
   section from `CHANGELOG.md` and publishes a GitHub Release (HACS updates from Releases,
   not bare tags). So a release requires, in order: bump `manifest.json` version → run
