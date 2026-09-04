@@ -5,7 +5,9 @@
  *   Throttled   — all entities with a rec-* policy (1/5/10min/off), from labels
  *   Accepted    — all entities with rec-accepted
  * Each row: name (click = more-info) · rate · statistics badge · policy switch · accept toggle.
- * Config:  type: custom:recorder-throttle-card  | title | hours:1 | limit:30
+ * Throttled/Accepted also get a live sort toggle (entity ID / friendly name) and all three
+ * tabs are paginated (page_size, default 50) — Unthrottled keeps its rate-first order.
+ * Config:  type: custom:recorder-throttle-card  | title | hours:1 | limit:30 | page_size:50 | sort:"entity_id"|"friendly_name"
  */
 const RT_POL = [
   { k: "full", c: "voll" },
@@ -27,6 +29,8 @@ const RT_I18N = {
     more_info: "More info",
     acc_btn: "✓ acc.", acc_title: "Mark as accepted heavy writer (stop reporting)",
     all_to: "All to", bulk_confirm: "Throttle all {n} listed entities to {p}?",
+    sort_label: "Sort:", sort_entity_id: "Entity ID", sort_friendly_name: "Friendly name",
+    page_prev: "Previous page", page_next: "Next page", page_info: "Page {page} of {pages}",
   },
   de: {
     header: "Recorder-Drosselung",
@@ -37,6 +41,8 @@ const RT_I18N = {
     more_info: "Mehr Infos",
     acc_btn: "✓ akz.", acc_title: "Als akzeptierten Vielschreiber markieren",
     all_to: "Alle auf", bulk_confirm: "Alle {n} angezeigten Entities auf {p} drosseln?",
+    sort_label: "Sortieren:", sort_entity_id: "Entity-ID", sort_friendly_name: "Anzeigename",
+    page_prev: "Vorherige Seite", page_next: "Nächste Seite", page_info: "Seite {page} von {pages}",
   },
 };
 
@@ -45,6 +51,9 @@ class RecorderThrottleCard extends HTMLElement {
     this._config = config;
     this._hours = config.hours || 1;
     this._limit = config.limit || 30;
+    this._pageSize = config.page_size || 50;
+    this._sort = config.sort === "friendly_name" ? "friendly_name" : "entity_id";
+    this._page = { unthrottled: 1, throttled: 1, accepted: 1 };
     this._tab = "unthrottled";
     this._data = null;
     this._built = false;
@@ -136,18 +145,32 @@ class RecorderThrottleCard extends HTMLElement {
       if (!predicate(pol, acc)) continue;
       out.push({ entity_id: eid, name: this._name(eid), policy: pol, accepted: acc, per_min: rm[eid], has_statistics: this._stat(eid) });
     }
-    return out.sort((a, b) => a.entity_id.localeCompare(b.entity_id));
+    return out;
+  }
+  _sortRows(rows) {
+    const key = this._sort === "friendly_name" ? "name" : "entity_id";
+    return rows.slice().sort((a, b) => String(a[key]).localeCompare(String(b[key])));
   }
   _throttledRows() {
-    return this._byLabel((pol) => pol !== "full");
+    return this._sortRows(this._byLabel((pol) => pol !== "full"));
   }
   _acceptedRows() {
-    return this._byLabel((pol, acc) => acc);
+    return this._sortRows(this._byLabel((pol, acc) => acc));
   }
   _rowsFor(tab) {
     if (tab === "throttled") return this._throttledRows();
     if (tab === "accepted") return this._acceptedRows();
     return this._unthrottledRows();
+  }
+  _paginate(rows, tabId) {
+    const size = this._pageSize;
+    const pages = Math.max(1, Math.ceil(rows.length / size));
+    let page = this._page[tabId] || 1;
+    if (page > pages) page = pages;
+    if (page < 1) page = 1;
+    this._page[tabId] = page;
+    const start = (page - 1) * size;
+    return { rows: rows.slice(start, start + size), page, pages };
   }
 
   _build() {
@@ -180,6 +203,12 @@ class RecorderThrottleCard extends HTMLElement {
       .rt-bulk{display:flex;align-items:center;gap:8px;padding:6px 0 8px;border-bottom:1px solid var(--divider-color,#2c333b);margin-bottom:4px;font-size:13px;color:var(--secondary-text-color,#9aa7b4)}
       .rt-bulk button{appearance:none;border:1px solid var(--divider-color,#2c333b);background:transparent;color:var(--primary-text-color);border-radius:8px;padding:4px 12px;font:inherit;font-size:13px;cursor:pointer}
       .rt-bulk button.m1:hover{border-color:#1a7f37;color:#3fb950}.rt-bulk button.m5:hover{border-color:#9e6a03;color:#d29922}
+      .rt-sort{display:flex;align-items:center;gap:8px;padding:6px 0 8px;border-bottom:1px solid var(--divider-color,#2c333b);margin-bottom:4px;font-size:13px;color:var(--secondary-text-color,#9aa7b4)}
+      .rt-sort .rt-seg button.on{background:var(--primary-color,#1f6feb)}
+      .rt-pager{display:flex;align-items:center;justify-content:center;gap:12px;padding:10px 0 2px}
+      .rt-pager button{appearance:none;border:1px solid var(--divider-color,#2c333b);background:transparent;color:var(--primary-text-color);border-radius:8px;padding:4px 10px;font:inherit;font-size:14px;cursor:pointer;line-height:1}
+      .rt-pager button:disabled{opacity:.35;cursor:default}
+      .rt-pager-info{font-size:12px;color:var(--secondary-text-color,#9aa7b4);min-width:70px;text-align:center}
     `;
     const tabs = document.createElement("div");
     tabs.className = "rt-tabs";
@@ -221,7 +250,36 @@ class RecorderThrottleCard extends HTMLElement {
       if (!window.confirm(msg)) return;
       this._hass.callService("recorder_throttle", "set_policy", { entity_id: ids, policy: el.dataset.k });
       setTimeout(() => this._fetch(), 1500);
+    } else if (el.dataset.act === "sort") {
+      if (el.dataset.k !== this._sort) {
+        this._sort = el.dataset.k;
+        this._page.throttled = 1;
+        this._page.accepted = 1;
+        this._render();
+      }
+    } else if (el.dataset.act === "page") {
+      const cur = this._page[this._tab] || 1;
+      this._page[this._tab] = el.dataset.dir === "next" ? cur + 1 : Math.max(1, cur - 1);
+      this._render();
     }
+  }
+
+  _renderSortToggle() {
+    const modes = [
+      { k: "entity_id", label: this._t("sort_entity_id") },
+      { k: "friendly_name", label: this._t("sort_friendly_name") },
+    ];
+    const btns = modes
+      .map((m) => `<button data-act="sort" data-k="${m.k}" class="${m.k === this._sort ? "on" : ""}">${m.label}</button>`)
+      .join("");
+    return `<div class="rt-sort"><span>${this._t("sort_label")}</span><div class="rt-seg">${btns}</div></div>`;
+  }
+  _renderPager(page, pages) {
+    return `<div class="rt-pager">
+      <button data-act="page" data-dir="prev" ${page <= 1 ? "disabled" : ""} title="${this._t("page_prev")}">‹</button>
+      <span class="rt-pager-info">${this._t("page_info").replace("{page}", page).replace("{pages}", pages)}</span>
+      <button data-act="page" data-dir="next" ${page >= pages ? "disabled" : ""} title="${this._t("page_next")}">›</button>
+    </div>`;
   }
 
   _render() {
@@ -240,11 +298,14 @@ class RecorderThrottleCard extends HTMLElement {
       this._wrap.innerHTML = `<div class="rt-empty">${this._data === null && this._tab === "unthrottled" ? this._t("loading") : this._t("no_entries")}</div>`;
       return;
     }
+    const { rows: pageRows, page, pages } = this._paginate(rows, this._tab);
+    const sortToggle = this._tab === "unthrottled" ? "" : this._renderSortToggle();
+    const pager = pages > 1 ? this._renderPager(page, pages) : "";
     const bulk =
       this._tab === "unthrottled"
         ? `<div class="rt-bulk"><span>${this._t("all_to")}</span><button data-act="bulk" data-k="1min" class="m1">${this._t("pol_1min")}</button><button data-act="bulk" data-k="5min" class="m5">${this._t("pol_5min")}</button></div>`
         : "";
-    this._wrap.innerHTML = bulk + rows
+    this._wrap.innerHTML = sortToggle + bulk + pageRows
       .map((w) => {
         const eid = w.entity_id;
         const pol = w.policy || "full";
@@ -264,14 +325,15 @@ class RecorderThrottleCard extends HTMLElement {
           <button class="rt-acc${acc ? " on" : ""}" data-act="accept" data-eid="${eid}" data-acc="${acc ? "1" : "0"}" title="${this._t("acc_title")}">${this._t("acc_btn")}</button>
         </div>`;
       })
-      .join("");
+      .join("") + pager;
   }
 
   getCardSize() {
-    return 2 + Math.ceil((this._rowsFor(this._tab).length || 6) * 0.6);
+    const shown = Math.min(this._rowsFor(this._tab).length, this._pageSize) || 6;
+    return 2 + Math.ceil(shown * 0.6);
   }
   static getStubConfig() {
-    return { hours: 1, limit: 30 };
+    return { hours: 1, limit: 30, page_size: 50, sort: "entity_id" };
   }
 }
 
