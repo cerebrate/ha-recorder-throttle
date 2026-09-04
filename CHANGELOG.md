@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.1
+- Card: Throttled/Accepted tabs get a live sort toggle (entity ID or friendly name, shared between the two tabs); the initial default can be set via the new `sort` option.
+- Card: all three tabs are now paginated (new `page_size` option, default 50) instead of rendering as one long list — makes the card usable on installations with large numbers of entities. The card's height stays constant while paging, so a shorter last page doesn't shift it around the dashboard.
+
 ## 1.0
 - Disabling throttling (`recorder_throttle.set_enabled` with `enabled: false`) now survives a restart: it stays off until you switch it back on. While throttling is disabled, a warning is logged on every start so it does not stay off unnoticed.
 - Removing the integration now cleans up after itself — the dashboard resource for the bundled card and the stored state are removed. Your `rec-*` labels are kept.
