@@ -25,6 +25,8 @@ and (for behavioral changes) manual smoke-testing against a real Home Assistant 
   section from `CHANGELOG.md` and publishes a GitHub Release (HACS updates from Releases,
   not bare tags). So a release requires, in order: bump `manifest.json` version → run
   `sync_card_version.py --fix` → add a `## <version>` section to `CHANGELOG.md` → tag.
+  `manifest.json`'s `version` and the `CHANGELOG.md` heading are unprefixed (e.g. `1.0`);
+  the git tag adds the `v` (e.g. `v1.0`) — the release workflow strips it back off to match.
 
 ## Architecture
 
