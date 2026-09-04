@@ -54,6 +54,7 @@ class RecorderThrottleCard extends HTMLElement {
     this._pageSize = config.page_size || 50;
     this._sort = config.sort === "friendly_name" ? "friendly_name" : "entity_id";
     this._page = { unthrottled: 1, throttled: 1, accepted: 1 };
+    this._rowH = null;
     this._tab = "unthrottled";
     this._data = null;
     this._built = false;
@@ -305,7 +306,12 @@ class RecorderThrottleCard extends HTMLElement {
       this._tab === "unthrottled"
         ? `<div class="rt-bulk"><span>${this._t("all_to")}</span><button data-act="bulk" data-k="1min" class="m1">${this._t("pol_1min")}</button><button data-act="bulk" data-k="5min" class="m5">${this._t("pol_5min")}</button></div>`
         : "";
-    this._wrap.innerHTML = sortToggle + bulk + pageRows
+    // Reserve a full page's worth of height on the rows container (from a previously
+    // measured row) so a shorter last page doesn't shrink the card and trigger a
+    // Lovelace masonry reflow that jumps the card on screen (only matters once paging
+    // is actually in effect for this tab; a single-page tab is naturally stable).
+    const rowsStyle = pages > 1 && this._rowH ? ` style="min-height:${this._rowH * this._pageSize}px"` : "";
+    const rowsHtml = pageRows
       .map((w) => {
         const eid = w.entity_id;
         const pol = w.policy || "full";
@@ -325,7 +331,10 @@ class RecorderThrottleCard extends HTMLElement {
           <button class="rt-acc${acc ? " on" : ""}" data-act="accept" data-eid="${eid}" data-acc="${acc ? "1" : "0"}" title="${this._t("acc_title")}">${this._t("acc_btn")}</button>
         </div>`;
       })
-      .join("") + pager;
+      .join("");
+    this._wrap.innerHTML = `${sortToggle}${bulk}<div class="rt-rows"${rowsStyle}>${rowsHtml}</div>${pager}`;
+    const firstRow = this._wrap.querySelector(".rt-row");
+    if (firstRow) this._rowH = firstRow.offsetHeight;
   }
 
   getCardSize() {
