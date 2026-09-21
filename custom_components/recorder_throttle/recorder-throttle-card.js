@@ -157,9 +157,9 @@ class RecorderThrottleCard extends HTMLElement {
     const key = this._sort === "friendly_name" ? "name" : "entity_id";
     return rows.slice().sort((a, b) => String(a[key]).localeCompare(String(b[key])));
   }
-  _throttledRows() {
+  _throttledRows(ignoreFilter) {
     const rows = this._byLabel((pol) => pol !== "full");
-    const filtered = this._hideAccepted ? rows.filter((w) => !w.accepted) : rows;
+    const filtered = this._hideAccepted && !ignoreFilter ? rows.filter((w) => !w.accepted) : rows;
     return this._sortRows(filtered);
   }
   _acceptedRows() {
@@ -315,8 +315,12 @@ class RecorderThrottleCard extends HTMLElement {
       throttled: this._throttledRows().length,
       accepted: this._acceptedRows().length,
     };
+    // When the Throttled filter is hiding accepted entities, show "shown/total" in the
+    // tab label instead of just the filtered count — otherwise it looks like entities
+    // went missing rather than just being filtered out of view.
+    const throttledLabel = this._hideAccepted ? `${counts.throttled}/${this._throttledRows(true).length}` : counts.throttled;
     this._tabsEl.innerHTML = RT_TAB_IDS.map(
-      (id) => `<button data-tab="${id}" class="${id === this._tab ? "on" : ""}">${this._t("tab_" + id)} (${counts[id]})</button>`
+      (id) => `<button data-tab="${id}" class="${id === this._tab ? "on" : ""}">${this._t("tab_" + id)} (${id === "throttled" ? throttledLabel : counts[id]})</button>`
     ).join("");
 
     const toolbarParts = [];
