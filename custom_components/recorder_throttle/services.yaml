@@ -62,6 +62,12 @@ top_writers:
       default: false
       selector:
         boolean: {}
+    exclude_throttled:
+      name: Exclude throttled
+      description: Leave out entities that already have a throttle policy (applied before the limit).
+      default: false
+      selector:
+        boolean: {}
 
 set_enabled:
   name: Enable or disable throttling

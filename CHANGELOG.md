@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.1
+- Throttle intervals are now measured on the time a state change happened, not on when the recorder got round to it. Previously, when the recorder worked off a backlog (right after a restart, or with a slow database), a throttled entity could keep a single value for the whole backlog; now it keeps one per interval, as configured.
+- The throttle hook is installed earlier during setup, so fewer state changes slip through unthrottled at startup.
+- The first heavy-writer scan now waits 5 minutes after Home Assistant starts, is skipped while the recorder has a large backlog, and never runs twice at the same time.
+- Heavy-writer detection no longer misses new heavy writers when already throttled or accepted entities fill the top of the list (exclusions are applied before the limit). New `exclude_throttled` option for `recorder_throttle.top_writers`.
+- If a `rec-*` label was deleted, setting that policy recreates it instead of silently removing the entity's throttling.
+- The Repairs fix no longer closes the notice when the heavy-writer query failed — it shows an error and leaves the notice open.
+- `recorder_throttle.top_writers` validates its inputs (window 0.1–168 h, limit 1–200).
+- Removing the integration also removes its services and open notices.
+- More robust against Home Assistant internals: extra arguments are passed through to the recorder, a failure in the throttle filter falls back to recording, and unloading only restores the recorder method if it is still ours.
+
 ## 1.0
 - Disabling throttling (`recorder_throttle.set_enabled` with `enabled: false`) now survives a restart: it stays off until you switch it back on. While throttling is disabled, a warning is logged on every start so it does not stay off unnoticed.
 - Removing the integration now cleans up after itself — the dashboard resource for the bundled card and the stored state are removed. Your `rec-*` labels are kept.

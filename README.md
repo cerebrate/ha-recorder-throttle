@@ -82,7 +82,7 @@ The card is localized: it shows German when Home Assistant's language is German,
 |---|---|---|
 | `recorder_throttle.set_policy` | `entity`, `policy`: `full` / `off` / `1min` / `5min` / `10min` | Sets the level for one or more entities (writes the matching `rec-*` label). |
 | `recorder_throttle.set_accepted` | `entity`, `accepted`: bool | Marks a heavy writer as reviewed so it stops being reported. |
-| `recorder_throttle.top_writers` | `hours`, `limit`, `exclude_accepted` | Returns the busiest writers plus `totals` (dropped / passed). Response data. |
+| `recorder_throttle.top_writers` | `hours` (0.1–168), `limit` (1–200), `exclude_accepted`, `exclude_throttled` | Returns the busiest writers plus `totals` (dropped / passed). Exclusions are applied before the limit. Response data. |
 | `recorder_throttle.set_enabled` | `enabled`: bool | Enables or **disables throttling** globally — see below. |
 | `recorder_throttle.rebuild` | — | Recomputes the policies from the current labels. |
 
