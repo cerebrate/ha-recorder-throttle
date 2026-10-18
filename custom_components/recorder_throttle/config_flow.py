@@ -42,7 +42,7 @@ def _schema(opts: dict) -> vol.Schema:
                         ): vol.All(vol.Coerce(int), vol.Range(min=1)),
                         vol.Optional(
                             CONF_WINDOW, default=opts.get(CONF_WINDOW, DEFAULTS[CONF_WINDOW])
-                        ): vol.All(vol.Coerce(float), vol.Range(min=0, min_included=False)),
+                        ): vol.All(vol.Coerce(float), vol.Range(min=0.1, max=168)),
                     }
                 ),
                 {"collapsed": False},

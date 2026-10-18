@@ -106,7 +106,8 @@
           }
         },
         "abort": {
-          "query_failed": "The heavy-writer query failed (see the log) — nothing was changed and the notice stays open. Try again later."
+          "query_failed": "The heavy-writer query failed (see the log) — nothing was changed and the notice stays open. Try again later.",
+          "apply_failed": "Applying the action failed (see the log) — the notice stays open."
         }
       }
     },

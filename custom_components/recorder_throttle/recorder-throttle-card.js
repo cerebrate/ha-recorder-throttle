@@ -85,14 +85,18 @@ class RecorderThrottleCard extends HTMLElement {
     if (!this._hass || this._fetching) return;
     this._fetching = true;
     try {
-      const r = await this._hass.callWS({
+      const call = (extra) => this._hass.callWS({
         type: "call_service",
         domain: "recorder_throttle",
         service: "top_writers",
-        service_data: { hours: this._hours, limit: this._limit, exclude_accepted: true },
+        service_data: { hours: this._hours, limit: this._limit, exclude_accepted: true, ...extra },
         return_response: true,
       });
-      this._data = ((r && r.response) || {}).writers || [];
+      // Unthrottled list: throttled entities excluded BEFORE the limit (else they can fill it);
+      // rates for the throttled tabs come from the unfiltered query.
+      const [u, all] = await Promise.all([call({ exclude_throttled: true }), call({})]);
+      this._data = ((u && u.response) || {}).writers || [];
+      this._rates = ((all && all.response) || {}).writers || [];
       this._render();
     } catch (e) {
       /* building / no perms */
@@ -118,7 +122,7 @@ class RecorderThrottleCard extends HTMLElement {
   }
   _rateMap() {
     const m = {};
-    (this._data || []).forEach((w) => (m[w.entity_id] = w.per_min));
+    [...(this._rates || []), ...(this._data || [])].forEach((w) => (m[w.entity_id] = w.per_min));
     return m;
   }
 

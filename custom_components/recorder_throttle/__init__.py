@@ -19,6 +19,7 @@ import voluptuous as vol
 from homeassistant.config_entries import SOURCE_IMPORT, ConfigEntry
 from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
 from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse, callback
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import issue_registry as ir
@@ -56,7 +57,7 @@ CONFIG_SCHEMA = vol.Schema(
                 vol.Optional(CONF_SCAN_ENABLED): cv.boolean,
                 vol.Optional(CONF_THRESHOLD): vol.All(vol.Coerce(float), vol.Range(min=0)),
                 vol.Optional(CONF_INTERVAL): vol.All(vol.Coerce(int), vol.Range(min=1)),
-                vol.Optional(CONF_WINDOW): vol.All(vol.Coerce(float), vol.Range(min=0, min_included=False)),
+                vol.Optional(CONF_WINDOW): vol.All(vol.Coerce(float), vol.Range(min=0.1, max=168)),
             },
             extra=vol.ALLOW_EXTRA,
         )
@@ -75,6 +76,7 @@ CARD_FILENAME = "recorder-throttle-card.js"
 CARD_URL = "/recorder_throttle/recorder-throttle-card.js"
 FIRST_SCAN_DELAY = 300  # s after start: let the recorder work off the startup burst first
 SCAN_SKIP_BACKLOG = 1000  # recorder queue length above which a scan round is postponed
+WINDOW_MIN, WINDOW_MAX = 0.1, 168.0  # hours; same bounds for options, scanner, service and repair
 
 _TOP_WRITERS_SQL = (
     "SELECT sm.entity_id, COUNT(*) AS c "
@@ -172,6 +174,7 @@ def _install_hook(hass: HomeAssistant) -> bool:
             return True
         lock = data["lock"]
         wall = time.time
+        state = {"on": True}  # per installation: switched off on unload, even if someone else wraps us
 
         def wrapped(event, *args, **kwargs):  # runs synchronously in the recorder thread
             """Throttle one state_changed event, or hand it to the recorder unchanged.
@@ -188,7 +191,7 @@ def _install_hook(hass: HomeAssistant) -> bool:
             Only the last two return ``None``. Reading them in isolation has already led
             to the wrong conclusion once ("it discards everything"), hence this note.
             """
-            if not data["enabled"]:
+            if not state["on"] or not data["enabled"]:
                 return orig(event, *args, **kwargs)
             try:
                 eid = event.data.get("entity_id")
@@ -221,6 +224,8 @@ def _install_hook(hass: HomeAssistant) -> bool:
         rec._process_state_changed_event_into_session = wrapped  # noqa: SLF001
         data["orig"] = orig
         data["rec"] = rec
+        data["wrapper"] = wrapped
+        data["wrapper_state"] = state
         _LOGGER.info("recorder_throttle: hook installed; %d entities throttled", len(data["policies"]))
         return True
     except Exception:  # noqa: BLE001 — fail-safe
@@ -232,13 +237,14 @@ def _install_hook(hass: HomeAssistant) -> bool:
 def _restore_hook(hass: HomeAssistant) -> None:
     data = hass.data.get(DOMAIN) or {}
     try:
-        rec, orig = data.get("rec"), data.get("orig")
+        if data.get("wrapper_state") is not None:
+            data["wrapper_state"]["on"] = False  # still nested under a foreign patch -> pure passthrough
+        rec, orig, mine = data.get("rec"), data.get("orig"), data.get("wrapper")
         if rec is not None and orig is not None:
             current = getattr(rec, "_process_state_changed_event_into_session", None)
-            if getattr(current, "_rt_wrapped", False):  # only take back OUR wrapper, never someone else's patch
+            if current is mine:  # identity, not an attribute: only take back OUR wrapper
                 rec._process_state_changed_event_into_session = orig  # noqa: SLF001
-            data["orig"] = None
-            data["rec"] = None
+        data.update({"orig": None, "rec": None, "wrapper": None, "wrapper_state": None})
     except Exception:  # noqa: BLE001 — fail-safe; a failed restore must not break unload
         _LOGGER.exception("recorder_throttle: restoring the recorder hook failed")
 
@@ -288,13 +294,16 @@ async def _set_policy(hass: HomeAssistant, entity_ids: list[str], policy: str) -
     return changed
 
 
-async def _set_accepted(hass: HomeAssistant, entity_ids: list[str], accepted: bool) -> None:
+async def _set_accepted(hass: HomeAssistant, entity_ids: list[str], accepted: bool) -> list[str]:
+    """Set/clear the accepted marker; returns the entity_ids actually changed."""
+    _ensure_labels(hass)
     ent_reg = er.async_get(hass)
     lab_reg = lr.async_get(hass)
     acc_id = next((l.label_id for l in lab_reg.async_list_labels() if l.name == ACCEPTED_LABEL), None)
     if acc_id is None:
         _LOGGER.warning("recorder_throttle: label '%s' missing", ACCEPTED_LABEL)
-        return
+        return []
+    changed: list[str] = []
     for eid in entity_ids:
         entry = ent_reg.async_get(eid)
         if entry is None:
@@ -302,6 +311,8 @@ async def _set_accepted(hass: HomeAssistant, entity_ids: list[str], accepted: bo
         labels = set(entry.labels)
         labels.add(acc_id) if accepted else labels.discard(acc_id)
         ent_reg.async_update_entity(eid, labels=labels)
+        changed.append(eid)
+    return changed
 
 
 # ---- Top writers + scan ---------------------------------------------------
@@ -323,7 +334,7 @@ async def _top_writers(
     policies = hass.data[DOMAIN]["policies"]
     accepted = _accepted_ids(hass)
     extra = (len(accepted) if exclude_accepted else 0) + (len(policies) if exclude_throttled else 0)
-    fetch = min(limit + extra, 5000)
+    fetch = limit + extra  # bounded by the number of entities; no cap, or exclusions could hide new writers again
 
     def _query():
         with session_scope(hass=hass, read_only=True) as session:
@@ -364,11 +375,14 @@ async def _top_writers(
     }
 
 
-async def _scan_top_writers(hass: HomeAssistant, conf: dict) -> None:
-    """Periodic scan: unthrottled, non-accepted heavy writers as ONE summary repair issue."""
+async def _scan_top_writers(hass: HomeAssistant, gen: object) -> None:
+    """Periodic scan: unthrottled, non-accepted heavy writers as ONE summary repair issue.
+
+    `gen` identifies the setup that started the scan: after an options reload (new settings) or
+    unload, a scan still in flight must not act on the old settings."""
     data = hass.data.get(DOMAIN) or {}
-    if not data.get("active", False):
-        return  # entry was unloaded while a scan task was still in flight
+    if not data.get("active", False) or data.get("gen") is not gen:
+        return  # entry was unloaded/reloaded while a scan task was still in flight
     if data.get("scan_running"):
         return  # previous round still in flight (slow database) — no overlapping scans
     try:
@@ -382,15 +396,17 @@ async def _scan_top_writers(hass: HomeAssistant, conf: dict) -> None:
         return
     data["scan_running"] = True
     try:
-        window = float(conf.get(CONF_WINDOW, DEFAULTS[CONF_WINDOW]))
+        conf = data["settings"]
+        window = min(max(float(conf.get(CONF_WINDOW, DEFAULTS[CONF_WINDOW])), WINDOW_MIN), WINDOW_MAX)
         res = await _top_writers(hass, window, 60, exclude_accepted=True, exclude_throttled=True)
     except Exception:  # noqa: BLE001
         _LOGGER.exception("recorder_throttle: top-writer scan failed")
         return
     finally:
         data["scan_running"] = False
-    if not data.get("active", False):
-        return  # unloaded while the query ran
+    if not data.get("active", False) or data.get("gen") is not gen:
+        return  # unloaded or reloaded (possibly with other settings) while the query ran
+    conf = data["settings"]
     thr = float(conf.get(CONF_THRESHOLD, DEFAULTS[CONF_THRESHOLD]))
     policies = hass.data[DOMAIN]["policies"]
     accepted = _accepted_ids(hass)
@@ -513,7 +529,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     data.setdefault("lock", threading.Lock())
     data["settings"] = settings
     data["active"] = True
-    entry.async_on_unload(lambda: data.update({"active": False}))
+    gen = object()  # this setup's identity (see _scan_top_writers)
+    data["gen"] = gen
+    data["scan_running"] = False
+
+    @callback
+    def _stop() -> None:
+        data.update({"active": False, "gen": None, "scan_running": False})
+        task = data.pop("scan_task", None)
+        if task is not None and not task.done():
+            task.cancel()  # the executor query itself finishes on its own; its result is then ignored
+
+    entry.async_on_unload(_stop)
 
     # Restore whether throttling is enabled (see const.STORAGE_KEY for why this is not
     # kept in the entry options). Default is enabled.
@@ -577,16 +604,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         @callback
         def _run_scan(_now=None) -> None:
-            hass.async_create_task(_scan_top_writers(hass, data["settings"]))
+            if data.get("gen") is gen:
+                data["scan_task"] = hass.async_create_task(_scan_top_writers(hass, gen))
 
-        entry.async_on_unload(async_track_time_interval(hass, _run_scan, interval))
+        @callback
+        def _start_scanning(_now=None) -> None:
+            """First scan now, then periodically — the interval timer starts only here, so no
+            scan runs before the startup delay is over."""
+            if data.get("gen") is not gen:
+                return
+            _run_scan()
+            entry.async_on_unload(async_track_time_interval(hass, _run_scan, interval))
+
         if hass.is_running:  # reload (options changed): the recorder is warm, scan soon
-            entry.async_on_unload(async_call_later(hass, 15, _run_scan))
+            entry.async_on_unload(async_call_later(hass, 15, _start_scanning))
         else:  # HA start: give the recorder time to work off the startup burst first
 
             @callback
             def _later(_event) -> None:
-                entry.async_on_unload(async_call_later(hass, FIRST_SCAN_DELAY, _run_scan))
+                entry.async_on_unload(async_call_later(hass, FIRST_SCAN_DELAY, _start_scanning))
 
             entry.async_on_unload(hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _later))
     else:
@@ -652,7 +688,8 @@ def _register_services(hass: HomeAssistant) -> None:
         return
 
     async def _svc_set_policy(call: ServiceCall) -> None:
-        await _set_policy(hass, call.data["entity_id"], call.data["policy"])
+        if call.data["entity_id"] and not await _set_policy(hass, call.data["entity_id"], call.data["policy"]):
+            raise HomeAssistantError("recorder_throttle: policy was not applied to any entity (see log)")
 
     async def _svc_set_enabled(call: ServiceCall) -> None:
         data = hass.data[DOMAIN]
@@ -676,7 +713,8 @@ def _register_services(hass: HomeAssistant) -> None:
             return {"error": str(err), "writers": []}
 
     async def _svc_set_accepted(call: ServiceCall) -> None:
-        await _set_accepted(hass, call.data["entity_id"], bool(call.data["accepted"]))
+        if call.data["entity_id"] and not await _set_accepted(hass, call.data["entity_id"], bool(call.data["accepted"])):
+            raise HomeAssistantError("recorder_throttle: accepted marker was not applied to any entity (see log)")
 
     hass.services.async_register(
         DOMAIN, SERVICE_SET_POLICY, _svc_set_policy,
@@ -690,7 +728,7 @@ def _register_services(hass: HomeAssistant) -> None:
         DOMAIN, SERVICE_TOP_WRITERS, _svc_top_writers,
         schema=vol.Schema(
             {
-                vol.Optional("hours", default=1): vol.All(vol.Coerce(float), vol.Range(min=0.1, max=168)),
+                vol.Optional("hours", default=1): vol.All(vol.Coerce(float), vol.Range(min=WINDOW_MIN, max=WINDOW_MAX)),
                 vol.Optional("limit", default=30): vol.All(vol.Coerce(int), vol.Range(min=1, max=200)),
                 vol.Optional("exclude_accepted", default=False): cv.boolean,
                 vol.Optional("exclude_throttled", default=False): cv.boolean,

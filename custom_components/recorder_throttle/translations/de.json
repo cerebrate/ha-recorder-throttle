@@ -106,7 +106,8 @@
           }
         },
         "abort": {
-          "query_failed": "Die Abfrage der Vielschreiber ist fehlgeschlagen (siehe Log) — es wurde nichts geändert, die Meldung bleibt offen. Später erneut versuchen."
+          "query_failed": "Die Abfrage der Vielschreiber ist fehlgeschlagen (siehe Log) — es wurde nichts geändert, die Meldung bleibt offen. Später erneut versuchen.",
+          "apply_failed": "Die Aktion konnte nicht angewendet werden (siehe Log) — die Meldung bleibt offen."
         }
       }
     },
