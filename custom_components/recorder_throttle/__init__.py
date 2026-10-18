@@ -169,9 +169,17 @@ def _install_hook(hass: HomeAssistant) -> bool:
         if rec is None:
             _LOGGER.error("recorder_throttle: no recorder instance found")
             return False
-        orig = rec._process_state_changed_event_into_session  # noqa: SLF001
-        if getattr(orig, "_rt_wrapped", False):
-            return True
+        current = rec._process_state_changed_event_into_session  # noqa: SLF001
+        prev_state = data.get("wrapper_state")
+        if current is data.get("wrapper") and prev_state is not None and prev_state["on"]:
+            return True  # our active installation is still in place (identity, not a copyable attribute)
+        if prev_state is not None:
+            # A previous installation of ours may still sit somewhere below `current` (recorder reloaded,
+            # or another integration wrapped it). Switch it to pass-through BEFORE the new filter goes
+            # live: at most one installation may filter, or two filters sharing `last` would drop the
+            # samples that are meant to be kept.
+            prev_state["on"] = False
+        orig = current
         lock = data["lock"]
         wall = time.time
         state = {"on": True}  # per installation: switched off on unload, even if someone else wraps us
@@ -342,6 +350,7 @@ async def _top_writers(
             return [(row[0], int(row[1])) for row in res]
 
     rows = await instance.async_add_executor_job(_query)
+    ent_reg = er.async_get(hass)
     writers = []
     for eid, cnt in rows:
         is_acc = eid in accepted
@@ -353,6 +362,7 @@ async def _top_writers(
             break
         st = hass.states.get(eid)
         iv = policies.get(eid)
+        in_registry = ent_reg.async_get(eid) is not None
         policy = "full" if iv is None else ("off" if iv == 0 else f"{iv // 60}min")
         writers.append(
             {
@@ -363,6 +373,8 @@ async def _top_writers(
                 "policy": policy,
                 "accepted": is_acc,
                 "has_statistics": bool(st and st.attributes.get("state_class")),
+                # throttling works through registry labels: entities without an entry cannot be throttled
+                "in_registry": in_registry,
             }
         )
     stats = hass.data[DOMAIN].get("stats", {})
@@ -383,8 +395,6 @@ async def _scan_top_writers(hass: HomeAssistant, gen: object) -> None:
     data = hass.data.get(DOMAIN) or {}
     if not data.get("active", False) or data.get("gen") is not gen:
         return  # entry was unloaded/reloaded while a scan task was still in flight
-    if data.get("scan_running"):
-        return  # previous round still in flight (slow database) — no overlapping scans
     try:
         from homeassistant.components.recorder import get_instance
 
@@ -394,7 +404,6 @@ async def _scan_top_writers(hass: HomeAssistant, gen: object) -> None:
     if backlog > SCAN_SKIP_BACKLOG:
         _LOGGER.debug("recorder_throttle: recorder backlog %s — top-writer scan postponed", backlog)
         return
-    data["scan_running"] = True
     try:
         conf = data["settings"]
         window = min(max(float(conf.get(CONF_WINDOW, DEFAULTS[CONF_WINDOW])), WINDOW_MIN), WINDOW_MAX)
@@ -402,8 +411,6 @@ async def _scan_top_writers(hass: HomeAssistant, gen: object) -> None:
     except Exception:  # noqa: BLE001
         _LOGGER.exception("recorder_throttle: top-writer scan failed")
         return
-    finally:
-        data["scan_running"] = False
     if not data.get("active", False) or data.get("gen") is not gen:
         return  # unloaded or reloaded (possibly with other settings) while the query ran
     conf = data["settings"]
@@ -414,6 +421,7 @@ async def _scan_top_writers(hass: HomeAssistant, gen: object) -> None:
         w
         for w in res["writers"]
         if w["per_min"] >= thr and w["entity_id"] not in accepted and policies.get(w["entity_id"]) is None
+        and w["in_registry"]  # not throttleable -> no notice that could never be resolved
     ]
     # Auto-throttle: apply a policy to in-scope new heavy writers instead of nagging.
     if flagged and conf.get(CONF_AUTO_THROTTLE, DEFAULTS[CONF_AUTO_THROTTLE]):
@@ -531,11 +539,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     data["active"] = True
     gen = object()  # this setup's identity (see _scan_top_writers)
     data["gen"] = gen
-    data["scan_running"] = False
+    data.pop("scan_task", None)
 
     @callback
     def _stop() -> None:
-        data.update({"active": False, "gen": None, "scan_running": False})
+        data.update({"active": False, "gen": None})
         task = data.pop("scan_task", None)
         if task is not None and not task.done():
             task.cancel()  # the executor query itself finishes on its own; its result is then ignored
@@ -582,8 +590,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if rec is None:
             return
         current = getattr(rec, "_process_state_changed_event_into_session", None)
-        if current is not None and not getattr(current, "_rt_wrapped", False):
-            _LOGGER.info("recorder_throttle: recorder reload detected — re-installing hook")
+        if current is not None and current is not data.get("wrapper"):
+            _LOGGER.info("recorder_throttle: recorder method replaced (reload or another patch) — re-installing hook")
             _set_hook_issue(hass, _install_hook(hass))
 
     entry.async_on_unload(async_track_time_interval(hass, _ensure_hook, timedelta(seconds=30)))
@@ -604,8 +612,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         @callback
         def _run_scan(_now=None) -> None:
-            if data.get("gen") is gen:
-                data["scan_task"] = hass.async_create_task(_scan_top_writers(hass, gen))
+            if data.get("gen") is not gen:
+                return
+            task = data.get("scan_task")
+            if task is not None and not task.done():
+                return  # previous round still waiting for the database — no overlapping scans
+            data["scan_task"] = hass.async_create_task(_scan_top_writers(hass, gen))
 
         @callback
         def _start_scanning(_now=None) -> None:

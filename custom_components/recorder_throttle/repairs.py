@@ -38,7 +38,7 @@ class TopWritersRepairFlow(RepairsFlow):
         writers = resp.get("writers", []) or []
         return [
             w["entity_id"] for w in writers
-            if (w.get("policy") or "full") == "full" and (w.get("per_min") or 0) >= thr
+            if (w.get("policy") or "full") == "full" and (w.get("per_min") or 0) >= thr and w.get("in_registry", True)
         ]
 
     async def _finish(self) -> FlowResult:
