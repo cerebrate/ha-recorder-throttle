@@ -1,8 +1,23 @@
 # Changelog
 
-## 1.1
+## Unreleased
 - Card: Throttled/Accepted tabs get a live sort toggle (entity ID or friendly name, shared between the two tabs); the initial default can be set via the new `sort` option.
 - Card: all three tabs are now paginated (new `page_size` option, default 50) instead of rendering as one long list — makes the card usable on installations with large numbers of entities. The card's height stays constant while paging, so a shorter last page doesn't shift it around the dashboard.
+- Card: the Throttled tab gets a live All/Unaccepted filter, so an entity you've just throttled is easy to find and accept without paging through everything already reviewed. The tab's count badge shows "shown/total" (e.g. `Throttled (88/767)`) while the filter is narrowing the view.
+
+## 1.1
+- Throttle intervals are now measured on the time a state change happened, not on when the recorder got round to it. Previously, when the recorder worked off a backlog (right after a restart, or with a slow database), a throttled entity could keep a single value for the whole backlog; now it keeps one per interval, as configured.
+- The throttle hook is installed earlier during setup, so fewer state changes slip through unthrottled at startup.
+- The first heavy-writer scan now waits 5 minutes after Home Assistant starts (the periodic scan only starts after that), is skipped while the recorder has a large backlog, and never runs twice at the same time. A scan still running while the settings are changed no longer acts on the old settings.
+- Entities without an entity-registry entry (which cannot carry labels and therefore cannot be throttled) are no longer reported as heavy writers.
+- Heavy-writer detection no longer misses new heavy writers when already throttled or accepted entities fill the top of the list (exclusions are applied before the limit). New `exclude_throttled` option for `recorder_throttle.top_writers`.
+- If a `rec-*` label was deleted, setting that policy recreates it instead of silently removing the entity's throttling.
+- The Repairs fix no longer closes the notice when the heavy-writer query or the chosen action failed — it shows an error and leaves the notice open.
+- The card's "Unthrottled" list is no longer emptied when throttled entities fill the top of the ranking.
+- `recorder_throttle.top_writers` validates its inputs (window 0.1–168 h, limit 1–200).
+- Removing the integration also removes its services and open notices.
+- More robust against Home Assistant internals: extra arguments are passed through to the recorder, a failure in the throttle filter falls back to recording, and unloading only restores the recorder method if it is still ours; if another integration has wrapped it in the meantime, our filter switches to pass-through instead of being left active.
+- The measurement window is limited to 0.1–168 hours everywhere (settings, scan, service, Repairs).
 
 ## 1.0
 - Disabling throttling (`recorder_throttle.set_enabled` with `enabled: false`) now survives a restart: it stays off until you switch it back on. While throttling is disabled, a warning is logged on every start so it does not stay off unnoticed.

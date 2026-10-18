@@ -20,23 +20,25 @@ class TopWritersRepairFlow(RepairsFlow):
             menu_options=["throttle_1min", "throttle_5min", "accept_all", "stop_reporting"],
         )
 
-    async def _flagged(self) -> list[str]:
-        """Recompute the currently reported (unthrottled, over-threshold) entities."""
+    async def _flagged(self) -> list[str] | None:
+        """Recompute the currently reported (unthrottled, over-threshold) entities. None = query failed."""
         settings = (self.hass.data.get(DOMAIN) or {}).get("settings", {})
-        window = float(settings.get(CONF_WINDOW, DEFAULTS[CONF_WINDOW]))
+        window = min(max(float(settings.get(CONF_WINDOW, DEFAULTS[CONF_WINDOW])), 0.1), 168.0)  # service bounds
         thr = float(settings.get(CONF_THRESHOLD, DEFAULTS[CONF_THRESHOLD]))
         try:
             resp = await self.hass.services.async_call(
                 DOMAIN, "top_writers",
-                {"hours": window, "limit": 100, "exclude_accepted": True},
+                {"hours": window, "limit": 100, "exclude_accepted": True, "exclude_throttled": True},
                 blocking=True, return_response=True,
             )
         except Exception:  # noqa: BLE001
-            return []
-        writers = (resp or {}).get("writers", []) or []
+            return None
+        if not resp or "error" in resp:  # error key present = failed, even with an empty message
+            return None  # a failed query must not be reported as "resolved"
+        writers = resp.get("writers", []) or []
         return [
             w["entity_id"] for w in writers
-            if (w.get("policy") or "full") == "full" and (w.get("per_min") or 0) >= thr
+            if (w.get("policy") or "full") == "full" and (w.get("per_min") or 0) >= thr and w.get("in_registry", True)
         ]
 
     async def _finish(self) -> FlowResult:
@@ -45,10 +47,15 @@ class TopWritersRepairFlow(RepairsFlow):
 
     async def _set_policy(self, policy: str) -> FlowResult:
         ids = await self._flagged()
+        if ids is None:
+            return self.async_abort(reason="query_failed")  # keep the issue: nothing was fixed
         if ids:
-            await self.hass.services.async_call(
-                DOMAIN, "set_policy", {"entity_id": ids, "policy": policy}, blocking=True
-            )
+            try:
+                await self.hass.services.async_call(
+                    DOMAIN, "set_policy", {"entity_id": ids, "policy": policy}, blocking=True
+                )
+            except Exception:  # noqa: BLE001 — nothing was throttled: keep the notice
+                return self.async_abort(reason="apply_failed")
         return await self._finish()
 
     async def async_step_throttle_1min(self, user_input=None) -> FlowResult:
@@ -59,10 +66,15 @@ class TopWritersRepairFlow(RepairsFlow):
 
     async def async_step_accept_all(self, user_input=None) -> FlowResult:
         ids = await self._flagged()
+        if ids is None:
+            return self.async_abort(reason="query_failed")
         if ids:
-            await self.hass.services.async_call(
-                DOMAIN, "set_accepted", {"entity_id": ids, "accepted": True}, blocking=True
-            )
+            try:
+                await self.hass.services.async_call(
+                    DOMAIN, "set_accepted", {"entity_id": ids, "accepted": True}, blocking=True
+                )
+            except Exception:  # noqa: BLE001
+                return self.async_abort(reason="apply_failed")
         return await self._finish()
 
     async def async_step_stop_reporting(self, user_input=None) -> FlowResult:
