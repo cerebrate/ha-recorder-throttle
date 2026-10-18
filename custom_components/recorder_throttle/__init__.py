@@ -350,6 +350,10 @@ async def _top_writers(
             return [(row[0], int(row[1])) for row in res]
 
     rows = await instance.async_add_executor_job(_query)
+    # The snapshot above only sizes the query. Labels may change while it is running;
+    # use current policies/exclusions so Repairs does not act on an outdated choice.
+    policies = hass.data[DOMAIN]["policies"]
+    accepted = _accepted_ids(hass)
     ent_reg = er.async_get(hass)
     writers = []
     for eid, cnt in rows:
